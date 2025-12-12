@@ -196,6 +196,8 @@ pub const TaggedType = union(enum) {
     tleaf_element: TLeafElement,
     tleafi: TLeafI,
     tleafd: TLeafD,
+    tleafo: TLeafO,
+    tleafl: TLeafL,
     tstreamer_info: TStreamerInfo,
     tstreamer_base: streamers.TStreamerBase,
     tstreamer_basic_type: streamers.TStreamerBasicType,
@@ -225,6 +227,12 @@ pub const TaggedType = union(enum) {
             return tagged;
         } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TLeafD")) {
             const tagged = TaggedType{ .tleafd = try .init(cursor, allocator) };
+            return tagged;
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TLeafO")) {
+            const tagged = TaggedType{ .tleafo = try .init(cursor, allocator) };
+            return tagged;
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TLeafL")) {
+            const tagged = TaggedType{ .tleafl = try .init(cursor, allocator) };
             return tagged;
         } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TStreamerInfo")) {
             const tagged = TaggedType{ .tstreamer_info = try .init(cursor, allocator) };
@@ -606,6 +614,25 @@ pub const TLeafI = struct {
     }
 };
 
+pub const TLeafL = struct {
+    header: ClassHeader = undefined,
+    leaf: TLeaf = undefined,
+    minimum: u64 = undefined,
+    maximum: u64 = undefined,
+
+    num_bytes: u64 = undefined,
+    pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !TLeafL {
+        var leafl = TLeafL{};
+        const start = cursor.seek;
+        leafl.header = .init(cursor);
+        leafl.leaf = try .init(cursor, allocator);
+        leafl.minimum = cursor.get_bytes_as_int(@TypeOf(leafl.minimum));
+        leafl.maximum = cursor.get_bytes_as_int(@TypeOf(leafl.maximum));
+        leafl.num_bytes = cursor.seek - start;
+        return leafl;
+    }
+};
+
 pub const TLeafD = struct {
     header: ClassHeader = undefined,
     leaf: TLeaf = undefined,
@@ -626,6 +653,29 @@ pub const TLeafD = struct {
         leafd.maximum = @bitCast(maximum_u64);
         leafd.num_bytes = cursor.seek - start;
         return leafd;
+    }
+};
+
+pub const TLeafO = struct {
+    header: ClassHeader = undefined,
+    leaf: TLeaf = undefined,
+    minimum: bool = undefined,
+    maximum: bool = undefined,
+
+    num_bytes: u64 = undefined,
+    pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !TLeafO {
+        var leafo = TLeafO{};
+        const start = cursor.seek;
+        leafo.header = .init(cursor);
+        leafo.leaf = try .init(cursor, allocator);
+        var minimum_u8: u8 = undefined;
+        minimum_u8 = cursor.get_bytes_as_int(@TypeOf(minimum_u8));
+        leafo.minimum = minimum_u8 != 0;
+        var maximum_u8: u8 = undefined;
+        maximum_u8 = cursor.get_bytes_as_int(@TypeOf(maximum_u8));
+        leafo.maximum = maximum_u8 != 0;
+        leafo.num_bytes = cursor.seek - start;
+        return leafo;
     }
 };
 
