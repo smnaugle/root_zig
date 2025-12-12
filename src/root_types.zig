@@ -2,6 +2,7 @@ const std = @import("std");
 
 const util = @import("utilities.zig");
 const Cursor = @import("cursor.zig");
+const streamers = @import("types/streamers.zig");
 
 pub const Constants = struct {
     kByteCountMask: u32 = 0x40000000,
@@ -50,17 +51,17 @@ pub const TAttLine = struct {
     line_color: u16 = undefined,
     line_style: u16 = undefined,
     line_width: u16 = undefined,
-    num_bytes: u32 = undefined,
 
-    pub fn init(buffer: []u8) TAttLine {
+    num_bytes: u64 = undefined,
+    pub fn init(cursor: *Cursor) TAttLine {
         var tattline: TAttLine = .{};
-        var next_byte: u32 = 0;
-        tattline.header = .init(buffer);
-        next_byte = next_byte + tattline.header.num_bytes;
-        tattline.line_color, next_byte = util.get_buffer_info(buffer, next_byte, u16);
-        tattline.line_style, next_byte = util.get_buffer_info(buffer, next_byte, u16);
-        tattline.line_width, next_byte = util.get_buffer_info(buffer, next_byte, u16);
-        tattline.num_bytes = next_byte;
+        const start: u64 = cursor.seek;
+        tattline.header = .init(cursor);
+        tattline.line_color = cursor.get_bytes_as_int(@TypeOf(tattline.line_color));
+        tattline.line_style = cursor.get_bytes_as_int(@TypeOf(tattline.line_style));
+        tattline.line_width = cursor.get_bytes_as_int(@TypeOf(tattline.line_width));
+
+        tattline.num_bytes = cursor.seek - start;
         return tattline;
     }
 };
@@ -87,15 +88,15 @@ pub const TAttMarker = struct {
     marker_color: u16 = undefined,
     marker_style: u16 = undefined,
     marker_size: f32 = undefined,
-    num_bytes: u32 = undefined,
 
+    num_bytes: u64 = undefined,
     pub fn init(cursor: *Cursor) TAttMarker {
         var tattmarker: TAttMarker = .{};
         const start = cursor.seek;
         tattmarker.header = .init(cursor);
         tattmarker.marker_color = cursor.get_bytes_as_int(@TypeOf(tattmarker.marker_color));
         tattmarker.marker_style = cursor.get_bytes_as_int(@TypeOf(tattmarker.marker_style));
-        const marker_size_u32: u32 = 0;
+        var marker_size_u32: u32 = 0;
         marker_size_u32 = cursor.get_bytes_as_int(@TypeOf(marker_size_u32));
         tattmarker.marker_size = @bitCast(marker_size_u32);
         tattmarker.num_bytes = cursor.seek - start;
@@ -123,6 +124,23 @@ pub const TObject = struct {
     }
 };
 
+pub const TObjString = struct {
+    header: ClassHeader = undefined,
+    object: TObject = undefined,
+    string: []u8 = undefined,
+
+    num_bytes: u64 = undefined,
+    pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !TObjString {
+        var str = TObjString{};
+        const start = cursor.seek;
+        str.header = .init(cursor);
+        str.object = .init(cursor);
+        str.string = try cursor.read_u32_and_get_string(allocator);
+        str.num_bytes = cursor.seek - start;
+        return str;
+    }
+};
+
 pub const ObjectTag = struct {
     // TODO: This should live in the TaggedType object since
 
@@ -133,7 +151,7 @@ pub const ObjectTag = struct {
     class_name: []u8 = undefined,
     num_bytes: u64 = undefined,
 
-    pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !ObjectTag {
+    pub noinline fn init(cursor: *Cursor, allocator: std.mem.Allocator) ObjectTag {
         var tag: ObjectTag = .{};
         const start = cursor.seek;
         tag.byte_count = cursor.get_bytes_as_int(@TypeOf(tag.byte_count));
@@ -141,7 +159,6 @@ pub const ObjectTag = struct {
         // NOTE: This comes after the byte counts have been read.
         const displacement = cursor.displacement();
         tag.class_tag = cursor.get_bytes_as_int(@TypeOf(tag.class_tag));
-        std.log.debug("Original class byte_count and class tag: {d}, {d}", .{ tag.byte_count, tag.class_tag });
         if (tag.class_tag != -1) {
             const lookup: u64 = @abs(tag.class_tag & ~constants.kClassMask);
             const name = cursor.record.get(lookup);
@@ -156,35 +173,101 @@ pub const ObjectTag = struct {
                 idx = idx + 1;
                 if (b == 0x00) break;
             }
-            tag.class_name = try allocator.alloc(u8, idx);
+            tag.class_name = allocator.alloc(u8, idx) catch |err| {
+                std.debug.panic("{}", .{err});
+            };
             @memcpy(tag.class_name, cursor.buffer[cursor.seek..(cursor.seek + idx)]);
             cursor.seek += idx;
             tag.num_bytes = cursor.seek - start;
-            try cursor.record.put(allocator, @abs(displacement + constants.kMapOffset), tag.class_name);
-            std.log.debug("Adding record: {d}, {s}", .{ displacement + constants.kMapOffset, tag.class_name });
+            cursor.record.put(allocator, @abs(displacement + constants.kMapOffset), tag.class_name) catch |err| {
+                std.debug.panic("{}", .{err});
+            };
         }
-        std.log.debug("Returning tag {}", .{tag});
         return tag;
     }
 };
 
 const TaggedType = union(enum) {
     tbranch: TBranch,
+    tbranch_element: TBranchElement,
     tleaf: TLeaf,
+    tleaf_element: TLeafElement,
+    tleafi: TLeafI,
+    tleafd: TLeafD,
     tstreamer_info: TStreamerInfo,
+    tstreamer_base: streamers.TStreamerBase,
+    tstreamer_basic_type: streamers.TStreamerBasicType,
+    tstreamer_string: streamers.TStreamerString,
+    tstreamer_basic_pointer: streamers.TStreamerBasicPointer,
+    tstreamer_object: streamers.TStreamerObject,
+    tstreamer_object_pointer: streamers.TStreamerObjectPointer,
+    tstreamer_loop: streamers.TStreamerLoop,
+    tstreamer_object_any: streamers.TStreamerObjectAny,
+    tstreamer_stl: streamers.TStreamerSTL,
+    tstreamer_stl_string: streamers.TStreamerSTLstring,
+    tobj_string: TObjString,
+    tlist: TList,
     none,
     pub fn init(class_name: []u8, cursor: *Cursor, allocator: std.mem.Allocator) !TaggedType {
         if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TBranch")) {
             const tagged = TaggedType{ .tbranch = try .init(cursor, allocator) };
             return tagged;
-        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 2)], "TLeaf")) {
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TLeaf")) {
             const tagged = TaggedType{ .tleaf = try .init(cursor, allocator) };
+            return tagged;
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TLeafElement")) {
+            const tagged = TaggedType{ .tleaf_element = try .init(cursor, allocator) };
+            return tagged;
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TLeafI")) {
+            const tagged = TaggedType{ .tleafi = try .init(cursor, allocator) };
+            return tagged;
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TLeafD")) {
+            const tagged = TaggedType{ .tleafd = try .init(cursor, allocator) };
             return tagged;
         } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TStreamerInfo")) {
             const tagged = TaggedType{ .tstreamer_info = try .init(cursor, allocator) };
             return tagged;
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TStreamerBase")) {
+            const tagged = TaggedType{ .tstreamer_base = try .init(cursor, allocator) };
+            return tagged;
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TStreamerBasicType")) {
+            const tagged = TaggedType{ .tstreamer_basic_type = try .init(cursor, allocator) };
+            return tagged;
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TStreamerString")) {
+            const tagged = TaggedType{ .tstreamer_string = try .init(cursor, allocator) };
+            return tagged;
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TStreamerBasicPointer")) {
+            const tagged = TaggedType{ .tstreamer_basic_pointer = try .init(cursor, allocator) };
+            return tagged;
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TStreamerObject")) {
+            const tagged = TaggedType{ .tstreamer_object = try .init(cursor, allocator) };
+            return tagged;
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TStreamerObjectPointer")) {
+            const tagged = TaggedType{ .tstreamer_object_pointer = try .init(cursor, allocator) };
+            return tagged;
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TStreamerLoop")) {
+            const tagged = TaggedType{ .tstreamer_loop = try .init(cursor, allocator) };
+            return tagged;
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TStreamerObjectAny")) {
+            const tagged = TaggedType{ .tstreamer_object_any = try .init(cursor, allocator) };
+            return tagged;
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TStreamerSTL")) {
+            const tagged = TaggedType{ .tstreamer_stl = try .init(cursor, allocator) };
+            return tagged;
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TStreamerSTLstring")) {
+            const tagged = TaggedType{ .tstreamer_stl_string = try .init(cursor, allocator) };
+            return tagged;
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TList")) {
+            const tagged = TaggedType{ .tlist = .init(cursor, allocator) };
+            return tagged;
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TObjString")) {
+            const tagged = TaggedType{ .tobj_string = try .init(cursor, allocator) };
+            return tagged;
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TBranchElement")) {
+            const tagged = TaggedType{ .tbranch_element = try .init(cursor, allocator) };
+            return tagged;
         } else {
-            std.debug.print("{s}\n", .{class_name});
+            std.log.warn("{s} is not implemented\n", .{class_name});
             return error.UnimplementedClass;
         }
     }
@@ -217,16 +300,13 @@ pub const TStreamerInfo = struct {
         var streamer: TStreamerInfo = .{};
         const start = cursor.seek;
         streamer.header = .init(cursor);
-        std.debug.print("streamer header: {}\n", .{streamer.header});
         streamer.named = try .init(cursor, allocator);
         streamer.checksum = cursor.get_bytes_as_int(@TypeOf(streamer.checksum));
         streamer.class_version = cursor.get_bytes_as_int(@TypeOf(streamer.class_version));
-        std.debug.print("next byte: {d}\n", .{cursor.seek});
-        const tag = try ObjectTag.init(cursor, allocator);
-        std.debug.print("mys tag: {}\n", .{tag});
+        // NOTE: ROOT docs show that this tag is here, I am not sure how uproot gets around this...
+        _ = ObjectTag.init(cursor, allocator);
         streamer.obj_array = .init(cursor, allocator);
         streamer.num_bytes = cursor.seek - start;
-        std.debug.print("streamer: {}\n", .{streamer});
         return streamer;
     }
 };
@@ -238,20 +318,25 @@ pub const TList = struct {
     nobjects: u32 = undefined,
     objects: []TaggedType = undefined,
 
-    pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !TList {
-        // WARN: This probably cannot fail for similar reasons to TObjArray, but seems fine for now
+    num_bytes: u64 = undefined,
+    pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) TList {
+        const start = cursor.seek;
         var list = TList{};
         list.byte_count = cursor.get_bytes_as_int(@TypeOf(list.byte_count));
         list.byte_count = list.byte_count ^ constants.kByteCountMask;
         list.version = cursor.get_bytes_as_int(@TypeOf(list.version));
         list.object = .init(cursor);
-        list.name, cursor.seek = try util.read_num_bytes_and_name(cursor.buffer, allocator, cursor.seek);
+        list.name, cursor.seek = util.read_num_bytes_and_name(cursor.buffer, allocator, cursor.seek) catch |err| {
+            std.debug.panic("Could not read TList name: {}", .{err});
+        };
         list.nobjects = cursor.get_bytes_as_int(@TypeOf(list.nobjects));
-        list.objects = try allocator.alloc(TaggedType, list.nobjects);
-        std.debug.print("List name: {s}, list nobjects: {d}\n", .{ list.name, list.nobjects });
+        list.objects = allocator.alloc(TaggedType, list.nobjects) catch |err| {
+            std.debug.panic("Could not allocate TList objects: {}, object: {}. nobjects: {}", .{ err, list.object, list.nobjects });
+        };
         for (0..list.nobjects) |idx| {
             var tag = ObjectTag{};
-            tag = try .init(cursor, allocator);
+            tag = .init(cursor, allocator);
+
             list.objects[idx] = TaggedType.init(tag.class_name, cursor, allocator) catch |err| {
                 std.log.warn("Cannot make object {s}, returned {}. Skipping object creation.", .{ tag.class_name, err });
                 cursor.seek = cursor.seek - tag.num_bytes + 4 + tag.byte_count;
@@ -260,6 +345,7 @@ pub const TList = struct {
             // FIXME: Speedbump, why do I need this plus 1?
             cursor.seek += 1;
         }
+        list.num_bytes = cursor.seek - start;
         return list;
     }
 };
@@ -292,11 +378,9 @@ pub const TObjArray = struct {
         };
         var tag = ObjectTag{};
         for (0..obj_array.nobjects) |idx| {
-            tag = ObjectTag.init(cursor, allocator) catch |err| {
-                std.debug.panic("Cannot make tag {}", .{err});
-            };
+            tag = ObjectTag.init(cursor, allocator);
             obj_array.objects[idx] = TaggedType.init(tag.class_name, cursor, allocator) catch |err| {
-                std.debug.print("Cannot make object {}\n", .{err});
+                std.log.warn("Cannot make object {}\n", .{err});
                 cursor.seek = cursor.seek - tag.num_bytes + 4 + tag.byte_count;
                 continue;
             };
@@ -346,7 +430,6 @@ pub const TBranch = struct {
         branch.entry_offset_len = cursor.get_bytes_as_int(@TypeOf(branch.compress));
         branch.write_basket = cursor.get_bytes_as_int(@TypeOf(branch.write_basket));
         branch.entry_number = cursor.get_bytes_as_int(@TypeOf(branch.entry_number));
-        std.debug.print("TBranch entry_number: {}\n", .{branch.entry_number});
         cursor.seek = cursor.seek + 11; // FIXME: skipping crap that is not in the documentation. See https://github.com/scikit-hep/uproot5/blob/ca05406536f23cb43b0d18c059a98920b31a8f20/src/uproot/models/TTree.py#L761
         // FIO feautures is 11 bytes based on uproot docs
         branch.offset = cursor.get_bytes_as_int(@TypeOf(branch.offset));
@@ -356,12 +439,11 @@ pub const TBranch = struct {
         branch.first_entry = cursor.get_bytes_as_int(@TypeOf(branch.first_entry));
         branch.tot_bytes = cursor.get_bytes_as_int(@TypeOf(branch.tot_bytes));
         branch.zip_bytes = cursor.get_bytes_as_int(@TypeOf(branch.zip_bytes));
-        std.debug.print("TBranch zip_bytes {d}\n", .{branch.zip_bytes});
         branch.branches = .init(cursor, allocator);
         branch.leaves = .init(cursor, allocator);
         // FIXME: Skipping branch.baskets for now, no root info on how to parse
         const basket_header = ClassHeader.init(cursor);
-        cursor.seek += basket_header.byte_counts;
+        cursor.seek = cursor.seek - basket_header.num_bytes + 4 + basket_header.byte_counts;
         cursor.seek = cursor.seek + 1; // FIXME: Speedbump?
         branch.basket_bytes = try allocator.alloc(std.meta.Child(@TypeOf(branch.basket_bytes)), branch.max_baskets);
         for (0..branch.max_baskets) |idx| {
@@ -391,6 +473,63 @@ pub const TBranch = struct {
     }
 };
 
+pub const TBranchElement = struct {
+    header: ClassHeader = undefined,
+    branch: TBranch = undefined,
+    class_name: TString = undefined,
+    parent_name: TString = undefined,
+    clones_name: TString = undefined,
+    checksum: i32 = undefined,
+    class_version: u16 = undefined,
+    id: i32 = undefined,
+    type: u32 = undefined,
+    streamer_type: u32 = undefined,
+    maximum: u32 = undefined,
+    // FIXME: v both are fed through read_object_any in uproot
+    branch_count: u32 = undefined,
+    branch_count2: u32 = undefined,
+
+    num_bytes: u64 = undefined,
+    pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !TBranchElement {
+        var branch_element = TBranchElement{};
+        const start = cursor.seek;
+        branch_element.header = .init(cursor);
+        branch_element.branch = try .init(cursor, allocator);
+        branch_element.class_name = try .init(cursor, allocator);
+        branch_element.parent_name = try .init(cursor, allocator);
+        branch_element.clones_name = try .init(cursor, allocator);
+        // FIXME: Why -1 here??
+        cursor.seek = cursor.seek - 1;
+        branch_element.checksum = cursor.get_bytes_as_int(@TypeOf(branch_element.checksum));
+        branch_element.class_version = cursor.get_bytes_as_int(@TypeOf(branch_element.class_version));
+        branch_element.id = cursor.get_bytes_as_int(@TypeOf(branch_element.id));
+        branch_element.type = cursor.get_bytes_as_int(@TypeOf(branch_element.type));
+        branch_element.streamer_type = cursor.get_bytes_as_int(@TypeOf(branch_element.streamer_type));
+        branch_element.maximum = cursor.get_bytes_as_int(@TypeOf(branch_element.maximum));
+        branch_element.branch_count = cursor.get_bytes_as_int(@TypeOf(branch_element.branch_count));
+        branch_element.branch_count2 = cursor.get_bytes_as_int(@TypeOf(branch_element.branch_count2));
+        branch_element.num_bytes = cursor.seek - start;
+        return branch_element;
+    }
+};
+
+pub const TString = struct {
+    string: []u8 = undefined,
+
+    pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !TString {
+        var string: TString = .{};
+        var idx: u32 = 0;
+        for (cursor.buffer[cursor.seek..]) |b| {
+            idx = idx + 1;
+            if (b == 0x00) break;
+        }
+        string.string = try allocator.alloc(u8, idx);
+        @memcpy(string.string, cursor.buffer[cursor.seek..(cursor.seek + idx)]);
+        cursor.seek += idx;
+        return string;
+    }
+};
+
 pub const TLeaf = struct {
     header: ClassHeader = undefined,
     named: TNamed = undefined,
@@ -399,9 +538,10 @@ pub const TLeaf = struct {
     offset: u32 = undefined,
     is_range: u8 = undefined,
     is_unsigned: u8 = undefined,
-    leaf_counts: u64 = undefined,
+    // FIXME: v Uproot uses read_object_any for this, perhaps the bcnt==0 branch?
+    leaf_counts: u32 = undefined,
 
-    num_bytes: u32 = undefined,
+    num_bytes: u64 = undefined,
 
     pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !TLeaf {
         var leaf = TLeaf{};
@@ -416,10 +556,71 @@ pub const TLeaf = struct {
         leaf.leaf_counts = cursor.get_bytes_as_int(@TypeOf(leaf.leaf_counts));
         // leaf.num_bytes = next_byte;
         // FIXME: Something wrong with leaf counts parsing
-        _ = start;
-        leaf.num_bytes = leaf.header.byte_counts + 4;
-        std.log.debug("Returning TLeaf: {}\n", .{leaf});
+        leaf.num_bytes = cursor.seek - start;
+        // leaf.num_bytes = leaf.header.byte_counts + 4;
+        // cursor.seek = start + leaf.num_bytes;
         return leaf;
+    }
+};
+
+pub const TLeafElement = struct {
+    header: ClassHeader = undefined,
+    leaf: TLeaf = undefined,
+    id: u32 = undefined,
+    type: u32 = undefined,
+
+    num_bytes: u64 = undefined,
+    pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !TLeafElement {
+        var leaf_element: TLeafElement = .{};
+        const start = cursor.seek;
+        leaf_element.header = .init(cursor);
+        leaf_element.leaf = try .init(cursor, allocator);
+        leaf_element.id = cursor.get_bytes_as_int(@TypeOf(leaf_element.id));
+        leaf_element.type = cursor.get_bytes_as_int(@TypeOf(leaf_element.type));
+        leaf_element.num_bytes = cursor.seek - start;
+        return leaf_element;
+    }
+};
+
+pub const TLeafI = struct {
+    header: ClassHeader = undefined,
+    leaf: TLeaf = undefined,
+    minimum: u32 = undefined,
+    maximum: u32 = undefined,
+
+    num_bytes: u64 = undefined,
+    pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !TLeafI {
+        var leafi = TLeafI{};
+        const start = cursor.seek;
+        leafi.header = .init(cursor);
+        leafi.leaf = try .init(cursor, allocator);
+        leafi.minimum = cursor.get_bytes_as_int(@TypeOf(leafi.minimum));
+        leafi.maximum = cursor.get_bytes_as_int(@TypeOf(leafi.maximum));
+        leafi.num_bytes = cursor.seek - start;
+        return leafi;
+    }
+};
+
+pub const TLeafD = struct {
+    header: ClassHeader = undefined,
+    leaf: TLeaf = undefined,
+    minimum: f64 = undefined,
+    maximum: f64 = undefined,
+
+    num_bytes: u64 = undefined,
+    pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !TLeafD {
+        var leafd = TLeafD{};
+        const start = cursor.seek;
+        leafd.header = .init(cursor);
+        leafd.leaf = try .init(cursor, allocator);
+        var minimum_u64: u64 = undefined;
+        minimum_u64 = cursor.get_bytes_as_int(@TypeOf(minimum_u64));
+        leafd.minimum = @bitCast(minimum_u64);
+        var maximum_u64: u64 = undefined;
+        maximum_u64 = cursor.get_bytes_as_int(@TypeOf(maximum_u64));
+        leafd.maximum = @bitCast(maximum_u64);
+        leafd.num_bytes = cursor.seek - start;
+        return leafd;
     }
 };
 
@@ -448,40 +649,37 @@ pub const TTree = struct {
     estimate: u64 = undefined,
     branches: TObjArray = undefined,
 
-    pub fn init(buffer: []u8, allocator: std.mem.Allocator) !TTree {
+    num_bytes: u64 = undefined,
+    pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !TTree {
         var tree: TTree = .{};
-        var next_byte: u32 = 0;
-        tree.header = ClassHeader.init(buffer);
-        next_byte = next_byte + tree.header.num_bytes;
-        tree.named = try TNamed.init(buffer[next_byte..buffer.len], allocator);
-        next_byte = next_byte + tree.named.num_bytes;
-        tree.att_line = TAttLine.init(buffer[(next_byte)..buffer.len]);
-        next_byte = next_byte + tree.att_line.num_bytes;
-        tree.att_fill = TAttFill.init(buffer[(next_byte)..buffer.len]);
-        next_byte = next_byte + tree.att_fill.num_bytes;
-        tree.att_marker = TAttMarker.init(buffer[(next_byte)..buffer.len]);
-        next_byte = next_byte + tree.att_marker.num_bytes;
-        tree.entries, next_byte = util.get_buffer_info(buffer, next_byte, u64);
-        tree.tot_bytes, next_byte = util.get_buffer_info(buffer, next_byte, u64);
-        tree.zip_bytes, next_byte = util.get_buffer_info(buffer, next_byte, u64);
-        tree.saved_bytes, next_byte = util.get_buffer_info(buffer, next_byte, u64);
-        tree.flushed_bytes, next_byte = util.get_buffer_info(buffer, next_byte, u64);
-        const weight_u64, next_byte = util.get_buffer_info(buffer, next_byte, u64);
+        const start: u64 = cursor.seek;
+        tree.header = ClassHeader.init(cursor);
+        tree.named = try TNamed.init(cursor, allocator);
+        tree.att_line = TAttLine.init(cursor);
+        tree.att_fill = TAttFill.init(cursor);
+        tree.att_marker = TAttMarker.init(cursor);
+        tree.entries = cursor.get_bytes_as_int(@TypeOf(tree.entries));
+        tree.tot_bytes = cursor.get_bytes_as_int(@TypeOf(tree.tot_bytes));
+        tree.zip_bytes = cursor.get_bytes_as_int(@TypeOf(tree.zip_bytes));
+        tree.saved_bytes = cursor.get_bytes_as_int(@TypeOf(tree.saved_bytes));
+        tree.flushed_bytes = cursor.get_bytes_as_int(@TypeOf(tree.flushed_bytes));
+        var weight_u64: u64 = undefined;
+        weight_u64 = cursor.get_bytes_as_int(@TypeOf(weight_u64));
         tree.weight = @bitCast(weight_u64);
-        tree.timer_interval, next_byte = util.get_buffer_info(buffer, next_byte, u32);
-        tree.scan_field, next_byte = util.get_buffer_info(buffer, next_byte, u32);
-        tree.update, next_byte = util.get_buffer_info(buffer, next_byte, u32);
-        tree.default_entry_offset_len, next_byte = util.get_buffer_info(buffer, next_byte, u32);
-        tree.n_cluster_range, next_byte = util.get_buffer_info(buffer, next_byte, u32);
-        tree.max_entries, next_byte = util.get_buffer_info(buffer, next_byte, u64);
-        tree.max_entry_loop, next_byte = util.get_buffer_info(buffer, next_byte, u64);
-        tree.max_virtual_size, next_byte = util.get_buffer_info(buffer, next_byte, u64);
-        tree.auto_save, next_byte = util.get_buffer_info(buffer, next_byte, u64);
-        tree.auto_flush, next_byte = util.get_buffer_info(buffer, next_byte, u64);
-        tree.estimate, next_byte = util.get_buffer_info(buffer, next_byte, u64);
-        next_byte = next_byte + 13; // FIXME: skipping crap that is not in the documentation. See https://github.com/scikit-hep/uproot5/blob/ca05406536f23cb43b0d18c059a98920b31a8f20/src/uproot/models/TTree.py#L761
-        tree.branches = .init(buffer[next_byte..buffer.len], allocator);
-        std.log.debug("Returing TTree {}", .{TTree});
+        tree.timer_interval = cursor.get_bytes_as_int(@TypeOf(tree.timer_interval));
+        tree.scan_field = cursor.get_bytes_as_int(@TypeOf(tree.scan_field));
+        tree.update = cursor.get_bytes_as_int(@TypeOf(tree.update));
+        tree.default_entry_offset_len = cursor.get_bytes_as_int(@TypeOf(tree.default_entry_offset_len));
+        tree.n_cluster_range = cursor.get_bytes_as_int(@TypeOf(tree.n_cluster_range));
+        tree.max_entries = cursor.get_bytes_as_int(@TypeOf(tree.max_entries));
+        tree.max_entry_loop = cursor.get_bytes_as_int(@TypeOf(tree.max_entry_loop));
+        tree.max_virtual_size = cursor.get_bytes_as_int(@TypeOf(tree.max_virtual_size));
+        tree.auto_save = cursor.get_bytes_as_int(@TypeOf(tree.auto_save));
+        tree.auto_flush = cursor.get_bytes_as_int(@TypeOf(tree.auto_flush));
+        tree.estimate = cursor.get_bytes_as_int(@TypeOf(tree.estimate));
+        cursor.seek = cursor.seek + 13; // FIXME: skipping crap that is not in the documentation. See https://github.com/scikit-hep/uproot5/blob/ca05406536f23cb43b0d18c059a98920b31a8f20/src/uproot/models/TTree.py#L761
+        tree.branches = .init(cursor, allocator);
+        tree.num_bytes = cursor.seek - start;
         return tree;
     }
 };

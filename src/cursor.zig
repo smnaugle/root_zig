@@ -28,3 +28,8 @@ pub fn get_bytes_as_int(self: *Cursor, comptime T: type) T {
     self.seek = next_byte;
     return value;
 }
+
+pub fn read_u32_and_get_string(self: *Cursor, allocator: std.mem.Allocator) ![]u8 {
+    const buffer, self.seek = try util.read_num_bytes_and_name(self.buffer, allocator, self.seek);
+    return buffer;
+}

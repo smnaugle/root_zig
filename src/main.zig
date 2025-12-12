@@ -187,7 +187,7 @@ pub const RootFile = struct {
         const streamer_data = try out.toOwnedSlice();
         var streamer_cursor = Cursor.init(streamer_data);
         streamer_cursor.set_origin((-1 * @as(i16, @bitCast(root_file.streamer_key.key_len))));
-        root_file.streamer_record = try .init(&streamer_cursor, allocator);
+        root_file.streamer_record = .init(&streamer_cursor, allocator);
 
         return root_file;
     }
@@ -233,26 +233,28 @@ pub fn main() !void {
     num_bytes = try root_file.file.read(&buf);
     // const ttree_key = try Key.init(&buf, allocator);
 
-    // var nbuf: [4096]u8 = undefined;
-    // var rfile = root_file.file.reader(&nbuf);
-    // try rfile.seekTo(root_file.root_key_record.keys[0].seek_key);
-    // const nb, _ = util.get_buffer_info(try rfile.interface.peek(4), 0, u32);
-    // const skbuf = try rfile.interface.readAlloc(allocator, nb);
-    // var skcursor: Cursor = .init(skbuf);
-    // const seeked_key = try Key.init(&skcursor, allocator);
-    // const seeked_key_head = skbuf[(seeked_key.key_len + 9)..skbuf.len];
-    // var comp_data: std.Io.Reader = .fixed(seeked_key_head);
-    // var decomp_buffer: [std.compress.flate.max_window_len]u8 = undefined;
-    // var out: std.Io.Writer.Allocating = .init(allocator);
-    // defer out.deinit();
-    // var zstd_stream = std.compress.flate.Decompress.init(&comp_data, .zlib, &decomp_buffer);
-    // _ = try zstd_stream.reader.streamRemaining(&out.writer);
-    // const decomp = try out.toOwnedSlice();
-    // const ttree = try types.TTree.init(decomp[0..decomp.len], allocator);
-    // _ = ttree;
-    // std.debug.print("{}\n", .{root_file.streamer_key});
-    // std.debug.print("{d}\n", .{root_file.streamer_key.num_bytes - root_file.streamer_key.key_len});
-    // std.debug.print("{}\n", .{root_file.streamer_record.nobjects});
-    // std.debug.print("{}\n", .{root_file.streamer_record});
+    var nbuf: [4096]u8 = undefined;
+    var rfile = root_file.file.reader(&nbuf);
+    try rfile.seekTo(root_file.root_key_record.keys[0].seek_key);
+    const nb, _ = util.get_buffer_info(try rfile.interface.peek(4), 0, u32);
+    const skbuf = try rfile.interface.readAlloc(allocator, nb);
+    var skcursor: Cursor = .init(skbuf);
+    const seeked_key = try Key.init(&skcursor, allocator);
+    const seeked_key_head = skbuf[(seeked_key.key_len + 9)..skbuf.len];
+    var comp_data: std.Io.Reader = .fixed(seeked_key_head);
+    var decomp_buffer: [std.compress.flate.max_window_len]u8 = undefined;
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var zstd_stream = std.compress.flate.Decompress.init(&comp_data, .zlib, &decomp_buffer);
+    _ = try zstd_stream.reader.streamRemaining(&out.writer);
+    const decomp = try out.toOwnedSlice();
+    var decomp_cursor: Cursor = .init(decomp);
+    decomp_cursor.set_origin(-1 * @as(i16, @bitCast(seeked_key.key_len)));
+    const ttree = try types.TTree.init(&decomp_cursor, allocator);
+    _ = ttree;
+    std.debug.print("{}\n", .{root_file.streamer_key});
+    std.debug.print("{d}\n", .{root_file.streamer_key.num_bytes - root_file.streamer_key.key_len});
+    std.debug.print("{}\n", .{root_file.streamer_record.nobjects});
+    std.debug.print("{}\n", .{root_file.streamer_record});
 }
 // 4002f78b00144000001a00010001000000000300000806
