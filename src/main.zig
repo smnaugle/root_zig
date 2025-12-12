@@ -23,8 +23,19 @@ const Key = struct {
     title_name_bytes: u8 = undefined,
     title_name: []u8 = undefined,
 
+    // Must outlive the Key
+    _allocator: std.mem.Allocator = undefined,
+    // This just needs to be something to read buffers from, currently we use same reader
+    // as the RootFile. Is populated in RootFile.get_key()
+    _reader: std.fs.File.Reader = undefined,
+
     pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !Key {
         var kl = Key{};
+
+        //Manage some state
+        kl._allocator = allocator;
+
+        // Read info
         kl.num_bytes = cursor.get_bytes_as_int(@TypeOf(kl.num_bytes));
         kl.version = cursor.get_bytes_as_int(@TypeOf(kl.version));
         kl.object_len = cursor.get_bytes_as_int(@TypeOf(kl.object_len));
@@ -41,34 +52,51 @@ const Key = struct {
         kl.title_name_bytes = @truncate(kl.title_name.len);
         return kl;
     }
+
+    pub fn add_reader(self: *Key, reader: *std.fs.File.Reader) void {
+        self._reader = reader;
+    }
+
+    pub fn read_data(self: *Key) !types.TaggedType {
+        // Add key len to seek to start at data record
+        try self._reader.seekTo(self.seek_key + self.key_len);
+        // No need to add 4 bytes here
+        const data_buffer_compressed = try self._reader.interface.readAlloc(self._allocator, self.num_bytes - self.key_len);
+        defer self._allocator.free(data_buffer_compressed);
+        // Skip 9 bytes for root compression header
+        var compressed_data: std.Io.Reader = .fixed(data_buffer_compressed[9..]);
+        var buf: [std.compress.flate.max_window_len]u8 = undefined;
+        var out: std.Io.Writer.Allocating = .init(self._allocator);
+        defer out.deinit();
+        var zstd_stream = std.compress.flate.Decompress.init(&compressed_data, .zlib, &buf);
+        _ = try zstd_stream.reader.streamRemaining(&out.writer);
+        const data = try out.toOwnedSlice();
+        defer self._allocator.free(data);
+        var cur: Cursor = .init(data);
+        cur.set_origin(-1 * @as(i16, @bitCast(self.key_len)));
+        return try types.TaggedType.init(self.class_name, &cur, self._allocator);
+    }
 };
 
 const Record = struct {
     num_keys: u32 = undefined,
     keys: []Key = undefined,
-    pub fn init(buffer: []u8, allocator: std.mem.Allocator) !@This() {
+    pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !@This() {
         var record = Record{};
-        var next_byte: u64 = 0;
-        record.num_keys, next_byte = util.get_buffer_info(buffer, next_byte, @TypeOf(record.num_keys));
+        record.num_keys = cursor.get_bytes_as_int(@TypeOf(record.num_keys));
         record.keys = try allocator.alloc(Key, record.num_keys);
         for (0..record.num_keys) |ki| {
-            var kcursor: Cursor = .init(buffer[next_byte..buffer.len]);
-            record.keys[ki] = try Key.init(&kcursor, allocator);
-            next_byte = next_byte + record.keys[ki].key_len;
+            record.keys[ki] = try Key.init(cursor, allocator);
         }
         return record;
     }
 };
 
 const FirstRecord = struct {
-    key: Key = undefined,
-
     // DATA
     tfile_name: []u8 = undefined,
-    tfile_name_end: u64 = undefined,
     tfile_title_name: []u8 = undefined,
-    tfile_title_name_end: u64 = undefined,
-    tdir_version: u8 = undefined,
+    tdir_version: u16 = undefined,
     creation_time: u32 = undefined,
     modification_time: u32 = undefined,
     num_bytes_keys_list: u32 = undefined,
@@ -77,33 +105,43 @@ const FirstRecord = struct {
     seek_parent_offset: u32 = undefined,
     seek_keys: u32 = undefined,
 
-    pub fn init(record_buffer: []u8, allocator: std.mem.Allocator) !FirstRecord {
+    pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !FirstRecord {
         var record: FirstRecord = FirstRecord{};
-
-        var kcursor = Cursor.init(record_buffer);
-        record.key = try Key.init(&kcursor, allocator);
-
-        record.tfile_name, record.tfile_name_end = try util.read_num_bytes_and_name(
-            record_buffer,
-            allocator,
-            @abs(record.key.key_len),
-        );
-
-        record.tfile_title_name, record.tfile_title_name_end = try util.read_num_bytes_and_name(
-            record_buffer,
-            allocator,
-            @truncate(@abs(record.tfile_name_end)),
-        );
-        var next_byte: u64 = undefined;
-        record.tdir_version, next_byte = util.get_buffer_info(record_buffer, record.tfile_title_name_end + 1, @TypeOf(record.tdir_version));
-        record.creation_time, next_byte = util.get_buffer_info(record_buffer, next_byte, @TypeOf(record.creation_time));
-        record.modification_time, next_byte = util.get_buffer_info(record_buffer, next_byte, @TypeOf(record.modification_time));
-        record.num_bytes_keys_list, next_byte = util.get_buffer_info(record_buffer, next_byte, @TypeOf(record.num_bytes_keys_list));
-        record.num_bytes_named, next_byte = util.get_buffer_info(record_buffer, next_byte, @TypeOf(record.num_bytes_named));
-        record.seek_dir_offset, next_byte = util.get_buffer_info(record_buffer, next_byte, @TypeOf(record.seek_dir_offset));
-        record.seek_parent_offset, next_byte = util.get_buffer_info(record_buffer, next_byte, @TypeOf(record.seek_parent_offset));
-        record.seek_keys, next_byte = util.get_buffer_info(record_buffer, next_byte, @TypeOf(record.seek_keys));
+        record.tfile_name = try cursor.read_u32_and_get_string(allocator);
+        record.tfile_title_name = try cursor.read_u32_and_get_string(allocator);
+        record.tdir_version = cursor.get_bytes_as_int(@TypeOf(record.tdir_version));
+        record.creation_time = cursor.get_bytes_as_int(@TypeOf(record.creation_time));
+        record.modification_time = cursor.get_bytes_as_int(@TypeOf(record.modification_time));
+        record.num_bytes_keys_list = cursor.get_bytes_as_int(@TypeOf(record.num_bytes_keys_list));
+        record.num_bytes_named = cursor.get_bytes_as_int(@TypeOf(record.num_bytes_named));
+        record.seek_dir_offset = cursor.get_bytes_as_int(@TypeOf(record.seek_dir_offset));
+        record.seek_parent_offset = cursor.get_bytes_as_int(@TypeOf(record.seek_parent_offset));
+        record.seek_keys = cursor.get_bytes_as_int(@TypeOf(record.seek_keys));
         return record;
+    }
+};
+
+pub const TDirectoryRoot = struct {
+    key: Key = undefined,
+    record: FirstRecord = undefined,
+
+    pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !TDirectoryRoot {
+        var dir = TDirectoryRoot{};
+        dir.key = try .init(cursor, allocator);
+        dir.record = try .init(cursor, allocator);
+        return dir;
+    }
+};
+
+pub const TDirectory = struct {
+    key: Key = undefined,
+    record: Record = undefined,
+
+    pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !TDirectory {
+        var dir = TDirectory{};
+        dir.key = try .init(cursor, allocator);
+        dir.record = try .init(cursor, allocator);
+        return dir;
     }
 };
 
@@ -138,46 +176,48 @@ const RootFileHeader = struct {
     }
 };
 
+const constants = types.Constants{};
 pub const RootFile = struct {
     file: std.fs.File = undefined,
+    allocator: std.mem.Allocator = undefined,
     header: RootFileHeader = undefined,
-    root_record: FirstRecord = undefined,
-    root_key: Key = undefined,
-    root_key_record: Record = undefined,
+    // My understanding is that a TDirectory and a KeysList live together,
+    // We should abstract these to be loaded together
+    root_directory: TDirectoryRoot = undefined,
+    root_keys_list: TDirectory = undefined,
     streamer_key: Key = undefined,
     streamer_record: types.TList = undefined,
+
+    _reader: std.fs.File.Reader = undefined,
 
     pub fn open(filename: []u8, allocator: std.mem.Allocator) !RootFile {
         var root_file = RootFile{};
         root_file.file = try util.open_file(filename);
+        root_file.allocator = allocator;
+        // TODO: Add reader options
         const buffer: []u8 = try allocator.alloc(u8, 1024 * 1024);
-        defer allocator.free(buffer);
-        var reader = root_file.file.reader(buffer);
-        try reader.seekTo(0);
-        const header_buffer = try reader.interface.take(100);
+        root_file._reader = root_file.file.reader(buffer);
+        try root_file._reader.seekTo(0);
+        const header_buffer = try root_file._reader.interface.take(constants.kFileHeaderSize);
         root_file.header = try RootFileHeader.init(header_buffer);
         if (root_file.header.version > 1000000) {
             return error.RootFileTooBigError;
         }
-        const first_record_bytes, _ = util.get_buffer_info(try reader.interface.peek(4), 0, u32);
-        const first_record_buffer = try reader.interface.readAlloc(allocator, first_record_bytes);
-        root_file.root_record = try FirstRecord.init(first_record_buffer, allocator);
+        const first_record_bytes, _ = util.get_buffer_info(try root_file._reader.interface.peek(4), 0, u32);
+        const first_record_buffer = try root_file._reader.interface.readAlloc(allocator, first_record_bytes + 4);
+        var first_record_cursor = Cursor.init(first_record_buffer);
+        root_file.root_directory = try TDirectoryRoot.init(&first_record_cursor, allocator);
 
-        try reader.seekTo(root_file.root_record.seek_keys);
-        const first_key_bytes, _ = util.get_buffer_info(try reader.interface.peek(4), 0, u32);
-        const first_key_buffer = try reader.interface.readAlloc(allocator, first_key_bytes);
+        try root_file._reader.seekTo(root_file.root_directory.record.seek_keys);
+        const first_key_bytes, _ = util.get_buffer_info(try root_file._reader.interface.peek(4), 0, u32);
+        const first_key_buffer = try root_file._reader.interface.readAlloc(allocator, first_key_bytes);
         var kcursor: Cursor = Cursor.init(first_key_buffer);
-        root_file.root_key = try Key.init(&kcursor, allocator);
+        root_file.root_keys_list = try .init(&kcursor, allocator);
 
-        try reader.seekTo(root_file.root_record.seek_keys + root_file.root_key.key_len);
-        const rec_buffer = try reader.interface.take(@abs(root_file.header.file_end) - reader.pos);
-        root_file.root_key_record = try Record.init(rec_buffer, allocator);
-
-        try reader.seekTo(@abs(root_file.header.streamer_begin_offset));
-        const streamer_buffer = try reader.interface.take(@abs(root_file.header.streamer_nbytes));
+        try root_file._reader.seekTo(@abs(root_file.header.streamer_begin_offset));
+        const streamer_buffer = try root_file._reader.interface.take(@abs(root_file.header.streamer_nbytes));
         var skcursor: Cursor = .init(streamer_buffer);
         root_file.streamer_key = try .init(&skcursor, allocator);
-        std.debug.print("Streamer key {}\n", .{root_file.streamer_key});
         var streamer_data_compressed: std.Io.Reader = .fixed(streamer_buffer[(root_file.streamer_key.key_len + 9)..streamer_buffer.len]);
         var buf: [std.compress.flate.max_window_len]u8 = undefined;
         var out: std.Io.Writer.Allocating = .init(allocator);
@@ -199,6 +239,35 @@ pub const RootFile = struct {
     pub fn close(self: RootFile) void {
         self.file.close();
     }
+
+    pub fn get_key(self: *RootFile, key_name: []const u8) ?Key {
+        // Add null terminator if not provided
+        var key_name_null_term: []u8 = undefined;
+        var key_len = key_name.len;
+        if (key_name[key_name.len - 1] != 0x00) {
+            key_len = key_name.len + 1;
+        }
+        key_name_null_term = self.allocator.alloc(u8, key_len) catch |err| {
+            std.debug.panic("Could not create string: {}", .{err});
+        };
+        defer self.allocator.free(key_name_null_term);
+        @memcpy(key_name_null_term[0..key_name.len], key_name);
+        key_name_null_term[key_name_null_term.len - 1] = 0x00;
+
+        // Now search for key
+        for (0..self.root_keys_list.record.num_keys) |idx| {
+            var key = self.root_keys_list.record.keys[idx];
+            if (std.mem.eql(u8, key.object_name, key_name_null_term)) {
+                key._reader = self._reader;
+                return key;
+            }
+        }
+        std.log.warn("Could not find key {s}, available keys are: ", .{key_name_null_term});
+        for (self.root_keys_list.record.keys) |key| {
+            std.log.info("{s}: {s}\t{s}", .{ key.class_name, key.title_name, key.object_name });
+        }
+        return null;
+    }
 };
 
 pub fn main() !void {
@@ -214,47 +283,9 @@ pub fn main() !void {
         return;
     }
 
-    const root_file = try RootFile.open(args[1], allocator);
+    var root_file = try RootFile.open(args[1], allocator);
     defer root_file.close();
-
-    try root_file.file.seekTo(100);
-    var buf: [4096]u8 = undefined;
-    _ = try root_file.file.read(&buf);
-    // const record = try FirstRecord.init(&buf, allocator);
-    const record = root_file.root_record;
-    try root_file.file.seekTo(record.seek_keys);
-    var num_bytes = try root_file.file.read(&buf);
-    // const kl = try Key.init(&buf, allocator);
-    const kl = root_file.root_key;
-    _ = kl;
-    const rec = root_file.root_key_record;
-    // const rec = try Record.init(buf[kl.key_len..num_bytes], allocator);
-    try root_file.file.seekTo(rec.keys[0].seek_key);
-    num_bytes = try root_file.file.read(&buf);
-    // const ttree_key = try Key.init(&buf, allocator);
-
-    var nbuf: [4096]u8 = undefined;
-    var rfile = root_file.file.reader(&nbuf);
-    try rfile.seekTo(root_file.root_key_record.keys[0].seek_key);
-    const nb, _ = util.get_buffer_info(try rfile.interface.peek(4), 0, u32);
-    const skbuf = try rfile.interface.readAlloc(allocator, nb);
-    var skcursor: Cursor = .init(skbuf);
-    const seeked_key = try Key.init(&skcursor, allocator);
-    const seeked_key_head = skbuf[(seeked_key.key_len + 9)..skbuf.len];
-    var comp_data: std.Io.Reader = .fixed(seeked_key_head);
-    var decomp_buffer: [std.compress.flate.max_window_len]u8 = undefined;
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    defer out.deinit();
-    var zstd_stream = std.compress.flate.Decompress.init(&comp_data, .zlib, &decomp_buffer);
-    _ = try zstd_stream.reader.streamRemaining(&out.writer);
-    const decomp = try out.toOwnedSlice();
-    var decomp_cursor: Cursor = .init(decomp);
-    decomp_cursor.set_origin(-1 * @as(i16, @bitCast(seeked_key.key_len)));
-    const ttree = try types.TTree.init(&decomp_cursor, allocator);
-    _ = ttree;
-    std.debug.print("{}\n", .{root_file.streamer_key});
-    std.debug.print("{d}\n", .{root_file.streamer_key.num_bytes - root_file.streamer_key.key_len});
-    std.debug.print("{}\n", .{root_file.streamer_record.nobjects});
-    std.debug.print("{}\n", .{root_file.streamer_record});
+    var output = root_file.get_key("output").?;
+    const tree = (try output.read_data()).ttree;
+    std.debug.print("{}\n", .{tree});
 }
-// 4002f78b00144000001a00010001000000000300000806

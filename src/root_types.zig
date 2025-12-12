@@ -8,6 +8,7 @@ pub const Constants = struct {
     kByteCountMask: u32 = 0x40000000,
     kClassMask: u32 = 0x80000000,
     kMapOffset: u32 = 2,
+    kFileHeaderSize: u32 = 100,
 };
 
 const constants = Constants{};
@@ -151,7 +152,7 @@ pub const ObjectTag = struct {
     class_name: []u8 = undefined,
     num_bytes: u64 = undefined,
 
-    pub noinline fn init(cursor: *Cursor, allocator: std.mem.Allocator) ObjectTag {
+    pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) ObjectTag {
         var tag: ObjectTag = .{};
         const start = cursor.seek;
         tag.byte_count = cursor.get_bytes_as_int(@TypeOf(tag.byte_count));
@@ -187,7 +188,8 @@ pub const ObjectTag = struct {
     }
 };
 
-const TaggedType = union(enum) {
+pub const TaggedType = union(enum) {
+    ttree: TTree,
     tbranch: TBranch,
     tbranch_element: TBranchElement,
     tleaf: TLeaf,
@@ -266,6 +268,9 @@ const TaggedType = union(enum) {
         } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TBranchElement")) {
             const tagged = TaggedType{ .tbranch_element = try .init(cursor, allocator) };
             return tagged;
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TTree")) {
+            const tagged = TaggedType{ .ttree = try .init(cursor, allocator) };
+            return tagged;
         } else {
             std.log.warn("{s} is not implemented\n", .{class_name});
             return error.UnimplementedClass;
@@ -275,7 +280,7 @@ const TaggedType = union(enum) {
     pub fn num_bytes(self: TaggedType) u64 {
         switch (self) {
             .none => return 0,
-            inline else => |tagged_type| return tagged_type.num_bytes,
+            else => |tagged_type| return tagged_type.num_bytes,
         }
     }
     //FIXME: Add in function here to get object size (num_bytes)
