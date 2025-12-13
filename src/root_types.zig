@@ -9,6 +9,7 @@ pub const Constants = struct {
     kClassMask: u32 = 0x80000000,
     kMapOffset: u32 = 2,
     kFileHeaderSize: u32 = 100,
+    kNewClassFlag: u32 = 0xFFFFFFFF,
 };
 
 const constants = Constants{};
@@ -150,13 +151,26 @@ pub const ObjectTag = struct {
     byte_count: u32 = undefined,
     class_tag: i32 = undefined,
     class_name: []u8 = undefined,
-    num_bytes: u64 = undefined,
+    num_bytes: u64 = 0,
 
     pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) ObjectTag {
         var tag: ObjectTag = .{};
         const start = cursor.seek;
         tag.byte_count = cursor.get_bytes_as_int(@TypeOf(tag.byte_count));
-        tag.byte_count = tag.byte_count ^ constants.kByteCountMask;
+        if (((tag.byte_count & constants.kByteCountMask) == 0) or (tag.byte_count == constants.kNewClassFlag)) {
+            tag.byte_count = 0;
+            tag.class_tag = @bitCast(tag.byte_count);
+            if (tag.class_tag == 1) {
+                std.debug.panic("Path not implemented\n", .{});
+            }
+            tag.class_name = allocator.alloc(u8, 5) catch |err| {
+                std.debug.panic("{}", .{err});
+            };
+            @memcpy(tag.class_name, "NONE\x00");
+            return tag;
+        } else {
+            tag.byte_count = tag.byte_count ^ constants.kByteCountMask;
+        }
         // NOTE: This comes after the byte counts have been read.
         const displacement = cursor.displacement();
         tag.class_tag = cursor.get_bytes_as_int(@TypeOf(tag.class_tag));
@@ -164,6 +178,7 @@ pub const ObjectTag = struct {
             const lookup: u64 = @abs(tag.class_tag & ~constants.kClassMask);
             const name = cursor.record.get(lookup);
             if (name == null) {
+                std.debug.print("tag {}\n", .{tag});
                 std.debug.panic("No name for {d}/{d}\n", .{ tag.class_tag, lookup });
             }
             tag.class_name = name.?;
@@ -184,6 +199,7 @@ pub const ObjectTag = struct {
                 std.debug.panic("{}", .{err});
             };
         }
+        std.debug.print("Returning: {s}\n", .{tag.class_name});
         return tag;
     }
 };
@@ -191,6 +207,7 @@ pub const ObjectTag = struct {
 pub const TaggedType = union(enum) {
     ttree: TTree,
     tbranch: TBranch,
+    tbasket: TBasket,
     tbranch_element: TBranchElement,
     tleaf: TLeaf,
     tleaf_element: TLeafElement,
@@ -213,7 +230,10 @@ pub const TaggedType = union(enum) {
     tlist: TList,
     none,
     pub fn init(class_name: []u8, cursor: *Cursor, allocator: std.mem.Allocator) !TaggedType {
-        if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TBranch")) {
+        if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "NONE")) {
+            const tagged = TaggedType{ .none = {} };
+            return tagged;
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TBranch")) {
             const tagged = TaggedType{ .tbranch = try .init(cursor, allocator) };
             return tagged;
         } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TLeaf")) {
@@ -275,6 +295,9 @@ pub const TaggedType = union(enum) {
             return tagged;
         } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TBranchElement")) {
             const tagged = TaggedType{ .tbranch_element = try .init(cursor, allocator) };
+            return tagged;
+        } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TBasket")) {
+            const tagged = TaggedType{ .tbasket = .init(cursor, allocator) };
             return tagged;
         } else if (std.mem.eql(u8, class_name[0..(class_name.len - 1)], "TTree")) {
             const tagged = TaggedType{ .ttree = try .init(cursor, allocator) };
@@ -389,6 +412,7 @@ pub const TObjArray = struct {
         obj_array.objects = allocator.alloc(TaggedType, obj_array.nobjects) catch |err| {
             std.debug.panic("Cannot make object array {}", .{err});
         };
+        std.debug.print("lb and nobj: {d} {}\n", .{ obj_array.lower_bound, obj_array.nobjects });
         var tag = ObjectTag{};
         for (0..obj_array.nobjects) |idx| {
             tag = ObjectTag.init(cursor, allocator);
@@ -402,6 +426,42 @@ pub const TObjArray = struct {
         // Crashes
         // std.log.debug("Returing TObjArray {}", .{obj_array});
         return obj_array;
+    }
+};
+
+pub const TBasket = struct {
+    nbytes: u32 = undefined,
+    key_version: u16 = undefined,
+    obj_len: u32 = undefined,
+    date_time: u32 = undefined,
+    key_len: u16 = undefined,
+    cycle: u16 = undefined,
+
+    version: u16 = undefined,
+    buffer_size: u32 = undefined,
+    nev_buf_size: u32 = undefined,
+    nev_buf: u32 = undefined,
+    last: u32 = undefined,
+
+    pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) TBasket {
+        _ = allocator;
+        var basket = TBasket{};
+        std.debug.print("In TBasket at {}\n", .{cursor.seek});
+        basket.nbytes = cursor.get_bytes_as_int(@TypeOf(basket.nbytes));
+        basket.key_version = cursor.get_bytes_as_int(@TypeOf(basket.key_version));
+        basket.obj_len = cursor.get_bytes_as_int(@TypeOf(basket.obj_len));
+        basket.date_time = cursor.get_bytes_as_int(@TypeOf(basket.date_time));
+        basket.key_len = cursor.get_bytes_as_int(@TypeOf(basket.key_len));
+        basket.cycle = cursor.get_bytes_as_int(@TypeOf(basket.cycle));
+        // Skip over class name, name, title
+        cursor.seek = cursor.seek + basket.key_len - 18 - 1;
+        basket.version = cursor.get_bytes_as_int(@TypeOf(basket.version));
+        basket.buffer_size = cursor.get_bytes_as_int(@TypeOf(basket.buffer_size));
+        basket.nev_buf_size = cursor.get_bytes_as_int(@TypeOf(basket.nev_buf_size));
+        basket.nev_buf = cursor.get_bytes_as_int(@TypeOf(basket.nev_buf));
+        basket.last = cursor.get_bytes_as_int(@TypeOf(basket.last));
+        cursor.seek += 1;
+        return basket;
     }
 };
 
@@ -455,8 +515,10 @@ pub const TBranch = struct {
         branch.branches = .init(cursor, allocator);
         branch.leaves = .init(cursor, allocator);
         // FIXME: Skipping branch.baskets for now, no root info on how to parse
-        const basket_header = ClassHeader.init(cursor);
-        cursor.seek = cursor.seek - basket_header.num_bytes + 4 + basket_header.byte_counts;
+        // const basket_header = ClassHeader.init(cursor);
+        // cursor.seek = cursor.seek - basket_header.num_bytes + 4 + basket_header.byte_counts;
+        std.debug.print("Getting baskets\n", .{});
+        branch.baskets = .init(cursor, allocator);
         cursor.seek = cursor.seek + 1; // FIXME: Speedbump?
         branch.basket_bytes = try allocator.alloc(std.meta.Child(@TypeOf(branch.basket_bytes)), branch.max_baskets);
         for (0..branch.max_baskets) |idx| {

@@ -314,4 +314,30 @@ pub fn main() !void {
     var output = root_file.get_key("output").?;
     const tree = (try output.read_data()).ttree;
     std.debug.print("{}\n", .{tree});
+    for (tree.branches.objects[32].tbranch.basket_seek, 0..) |s, idx| {
+        std.debug.print("{d}\n", .{tree.branches.objects[32].tbranch.basket_bytes[idx]});
+        std.debug.print("{d}\n", .{s});
+        if (s == 0) {
+            continue;
+        }
+        try root_file._reader.seekTo(s);
+        var buf = try root_file._reader.interface.readAlloc(allocator, 1000);
+        var cursor: Cursor = Cursor.init(buf);
+        const k: Key = try .init(&cursor, allocator);
+        try root_file._reader.seekTo(s + k.key_len);
+        buf = try root_file._reader.interface.readAlloc(allocator, k.num_bytes - k.key_len);
+        var compressed_data: std.Io.Reader = .fixed(buf[9..]);
+        var debuf: [std.compress.flate.max_window_len]u8 = undefined;
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        var zstd_stream = std.compress.flate.Decompress.init(&compressed_data, .zlib, &debuf);
+        _ = try zstd_stream.reader.streamRemaining(&out.writer);
+        const data = try out.toOwnedSlice();
+        std.debug.print("data len {}\n", .{data.len});
+        // std.debug.print("data {x}\n", .{data});
+        const dt = util.date_time(k.date_time);
+        std.debug.print("{d}\n", .{k.key_len});
+        std.debug.print("{d}\n", .{k.num_bytes});
+        std.debug.print("{}\n", .{dt});
+    }
 }
