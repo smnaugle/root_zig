@@ -14,8 +14,8 @@ const Key = struct {
     /// This is the number of bytes in the key
     key_len: u16 = undefined,
     cycle: u16 = undefined,
-    seek_key: u32 = undefined,
-    seek_parent_dir: u32 = undefined,
+    seek_key: u64 = undefined,
+    seek_parent_dir: u64 = undefined,
     class_name_bytes: u8 = undefined,
     class_name: []u8 = undefined,
     object_name_bytes: u8 = undefined,
@@ -28,7 +28,6 @@ const Key = struct {
     // This just needs to be something to read buffers from, currently we use same reader
     // as the RootFile. Is populated in RootFile.get_key()
     _reader: std.fs.File.Reader = undefined,
-
     pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !Key {
         var kl = Key{};
 
@@ -42,8 +41,13 @@ const Key = struct {
         kl.date_time = cursor.get_bytes_as_int(@TypeOf(kl.date_time));
         kl.key_len = cursor.get_bytes_as_int(@TypeOf(kl.key_len));
         kl.cycle = cursor.get_bytes_as_int(@TypeOf(kl.cycle));
-        kl.seek_key = cursor.get_bytes_as_int(@TypeOf(kl.seek_key));
-        kl.seek_parent_dir = cursor.get_bytes_as_int(@TypeOf(kl.seek_parent_dir));
+        if (kl.version < 1000) {
+            kl.seek_key = cursor.get_bytes_as_int(u32);
+            kl.seek_parent_dir = cursor.get_bytes_as_int(u32);
+        } else {
+            kl.seek_key = cursor.get_bytes_as_int(u64);
+            kl.seek_parent_dir = cursor.get_bytes_as_int(u64);
+        }
         kl.class_name, cursor.seek = try util.read_num_bytes_and_name(cursor.buffer, allocator, cursor.seek);
         kl.class_name_bytes = @truncate(kl.class_name.len);
         kl.object_name, cursor.seek = try util.read_num_bytes_and_name(cursor.buffer, allocator, cursor.seek);
@@ -101,9 +105,9 @@ const FirstRecord = struct {
     modification_time: u32 = undefined,
     num_bytes_keys_list: u32 = undefined,
     num_bytes_named: u32 = undefined,
-    seek_dir_offset: u32 = undefined,
-    seek_parent_offset: u32 = undefined,
-    seek_keys: u32 = undefined,
+    seek_dir_offset: u64 = undefined,
+    seek_parent_offset: u64 = undefined,
+    seek_keys: u64 = undefined,
 
     pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !FirstRecord {
         var record: FirstRecord = FirstRecord{};
@@ -114,9 +118,15 @@ const FirstRecord = struct {
         record.modification_time = cursor.get_bytes_as_int(@TypeOf(record.modification_time));
         record.num_bytes_keys_list = cursor.get_bytes_as_int(@TypeOf(record.num_bytes_keys_list));
         record.num_bytes_named = cursor.get_bytes_as_int(@TypeOf(record.num_bytes_named));
-        record.seek_dir_offset = cursor.get_bytes_as_int(@TypeOf(record.seek_dir_offset));
-        record.seek_parent_offset = cursor.get_bytes_as_int(@TypeOf(record.seek_parent_offset));
-        record.seek_keys = cursor.get_bytes_as_int(@TypeOf(record.seek_keys));
+        if (record.tdir_version < 1000) {
+            record.seek_dir_offset = cursor.get_bytes_as_int(u32);
+            record.seek_parent_offset = cursor.get_bytes_as_int(u32);
+            record.seek_keys = cursor.get_bytes_as_int(u32);
+        } else {
+            record.seek_dir_offset = cursor.get_bytes_as_int(u64);
+            record.seek_parent_offset = cursor.get_bytes_as_int(u64);
+            record.seek_keys = cursor.get_bytes_as_int(u64);
+        }
         return record;
     }
 };
@@ -145,33 +155,50 @@ pub const TDirectory = struct {
     }
 };
 
-const RootFileHeader = struct {
-    const FTYPE_BYTES = [_]u8{ 0, 4 };
-    const VERSION_BYTES = [_]u8{ 4, 8 };
-    const REC_BEG_BYTES = [_]u8{ 8, 12 };
-    const FILE_END_BYTES = [_]u8{ 12, 16 };
-    const COMPRESSION_BYTES = [_]u8{ 33, 37 };
-    const STR_BEG_BYTES = [_]u8{ 37, 41 };
-    const STR_NB_BYTES = [_]u8{ 41, 45 };
+// Attempted an interface for header types, but that was overkill
+// const Header = struct {
+//     // Use an interface to allow for different sized headers depending on file size
+//     ptr: *anyopaque,
+//     initFn: *const fn (ptr: *anyopaque, buffer: []u8) anyerror!*anyopaque,
+//
+//     pub fn init(self: Header, buffer: []u8) !void {
+//         const init_ptr = try self.initFn(self.ptr, buffer);
+//         self.ptr = init_ptr;
+//     }
+// };
 
+const Header = struct {
     ftype: [4]u8 = undefined,
     version: i32 = undefined,
-    data_record_begin: i64 = undefined,
+    data_record_begin: u32 = undefined,
     file_end: i64 = undefined,
     compression: i32 = undefined,
-    streamer_begin_offset: i32 = undefined,
+    streamer_begin_offset: i64 = undefined,
     streamer_nbytes: i32 = undefined,
 
-    fn init(header_buffer: []u8) !RootFileHeader {
-        const header: RootFileHeader = .{
-            .ftype = header_buffer[FTYPE_BYTES[0]..FTYPE_BYTES[1]].*,
-            .version = std.mem.readVarInt(i32, header_buffer[VERSION_BYTES[0]..VERSION_BYTES[1]], .big),
-            .data_record_begin = std.mem.readVarInt(i32, header_buffer[REC_BEG_BYTES[0]..REC_BEG_BYTES[1]], .big),
-            .file_end = std.mem.readVarInt(i64, header_buffer[FILE_END_BYTES[0]..FILE_END_BYTES[1]], .big),
-            .compression = std.mem.readVarInt(i32, header_buffer[COMPRESSION_BYTES[0]..COMPRESSION_BYTES[1]], .big),
-            .streamer_begin_offset = std.mem.readVarInt(i32, header_buffer[STR_BEG_BYTES[0]..STR_BEG_BYTES[1]], .big),
-            .streamer_nbytes = std.mem.readVarInt(i32, header_buffer[STR_NB_BYTES[0]..STR_NB_BYTES[1]], .big),
-        };
+    fn init(cursor: *Cursor) !Header {
+        var header: Header = .{};
+        @memcpy(&header.ftype, cursor.buffer[0..(header.ftype.len)]);
+        cursor.seek += header.ftype.len;
+        header.version = cursor.get_bytes_as_int(@TypeOf(header.version));
+        header.data_record_begin = cursor.get_bytes_as_int(@TypeOf(header.data_record_begin));
+        if (header.version < 1000000) {
+            // For small files
+            header.file_end = cursor.get_bytes_as_int(u32);
+            // FIXME: Skip a bunch of stuff
+            cursor.seek += 17;
+            header.compression = cursor.get_bytes_as_int(@TypeOf(header.compression));
+            header.streamer_begin_offset = cursor.get_bytes_as_int(u32);
+            header.streamer_nbytes = cursor.get_bytes_as_int(@TypeOf(header.streamer_nbytes));
+        } else {
+            // For big files
+            header.file_end = cursor.get_bytes_as_int(i64);
+            // FIXME: Skip a bunch of stuff
+            cursor.seek += 21;
+            header.compression = cursor.get_bytes_as_int(@TypeOf(header.compression));
+            header.streamer_begin_offset = cursor.get_bytes_as_int(i64);
+            header.streamer_nbytes = cursor.get_bytes_as_int(@TypeOf(header.streamer_nbytes));
+        }
         return header;
     }
 };
@@ -180,7 +207,7 @@ const constants = types.Constants{};
 pub const RootFile = struct {
     file: std.fs.File = undefined,
     allocator: std.mem.Allocator = undefined,
-    header: RootFileHeader = undefined,
+    header: Header = undefined,
     // My understanding is that a TDirectory and a KeysList live together,
     // We should abstract these to be loaded together
     root_directory: TDirectoryRoot = undefined,
@@ -199,10 +226,9 @@ pub const RootFile = struct {
         root_file._reader = root_file.file.reader(buffer);
         try root_file._reader.seekTo(0);
         const header_buffer = try root_file._reader.interface.take(constants.kFileHeaderSize);
-        root_file.header = try RootFileHeader.init(header_buffer);
-        if (root_file.header.version > 1000000) {
-            return error.RootFileTooBigError;
-        }
+        var header_cursor = Cursor.init(header_buffer);
+        root_file.header = try .init(&header_cursor);
+        std.debug.print("header: {}\n", .{root_file.header});
         const first_record_bytes, _ = util.get_buffer_info(try root_file._reader.interface.peek(4), 0, u32);
         const first_record_buffer = try root_file._reader.interface.readAlloc(allocator, first_record_bytes + 4);
         var first_record_cursor = Cursor.init(first_record_buffer);
