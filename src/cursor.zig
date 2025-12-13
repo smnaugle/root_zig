@@ -10,6 +10,7 @@ origin: i64 = 0,
 record: std.AutoHashMapUnmanaged(u64, []u8) = .{},
 
 pub fn init(buffer: []u8) Cursor {
+    // FIXME: Should every cursor get a copy of the buffer?
     var cursor = Cursor{};
     cursor.buffer = buffer;
     return cursor;

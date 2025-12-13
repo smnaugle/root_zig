@@ -314,6 +314,13 @@ pub const TaggedType = union(enum) {
             else => |tagged_type| return tagged_type.num_bytes,
         }
     }
+
+    pub fn deinit(self: TaggedType) void {
+        switch (self) {
+            .none => return,
+            else => |tagged_type| return tagged_type.deinit(),
+        }
+    }
     //FIXME: Add in function here to get object size (num_bytes)
 };
 
@@ -355,9 +362,11 @@ pub const TList = struct {
     objects: []TaggedType = undefined,
 
     num_bytes: u64 = undefined,
+    _allocator: std.mem.Allocator = undefined,
     pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) TList {
         const start = cursor.seek;
         var list = TList{};
+        list._allocator = allocator;
         list.byte_count = cursor.get_bytes_as_int(@TypeOf(list.byte_count));
         list.byte_count = list.byte_count ^ constants.kByteCountMask;
         list.version = cursor.get_bytes_as_int(@TypeOf(list.version));
@@ -383,6 +392,17 @@ pub const TList = struct {
         }
         list.num_bytes = cursor.seek - start;
         return list;
+    }
+
+    pub fn deinit(self: *TList) void {
+        // FIXME: Add object deinit
+        // self.object.deinit();
+        self._allocator.free(self.name);
+        //FIXME: Deinit to TaggedType
+        // for (0..self.nobjects) |idx| {
+        //     self.objects[idx].deinit();
+        // }
+        self._allocator.free(self.objects);
     }
 };
 
