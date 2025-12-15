@@ -1,8 +1,10 @@
 const std = @import("std");
 
+const main = @import("main.zig");
 const util = @import("utilities.zig");
 const Cursor = @import("cursor.zig");
-const streamers = @import("types/streamers.zig");
+const types = @import("types/types.zig");
+const streamers = types.streamers;
 
 pub const Constants = struct {
     kByteCountMask: u32 = 0x40000000,
@@ -178,7 +180,7 @@ pub const ObjectTag = struct {
             const lookup: u64 = @abs(tag.class_tag & ~constants.kClassMask);
             const name = cursor.record.get(lookup);
             if (name == null) {
-                std.debug.print("tag {}\n", .{tag});
+                std.log.err("tag {}\n", .{tag});
                 std.debug.panic("No name for {d}/{d}\n", .{ tag.class_tag, lookup });
             }
             tag.class_name = name.?;
@@ -199,7 +201,6 @@ pub const ObjectTag = struct {
                 std.debug.panic("{}", .{err});
             };
         }
-        std.debug.print("Returning: {s}\n", .{tag.class_name});
         return tag;
     }
 };
@@ -311,24 +312,18 @@ pub const TaggedType = union(enum) {
     pub fn num_bytes(self: TaggedType) u64 {
         switch (self) {
             .none => return 0,
-            else => |tagged_type| return tagged_type.num_bytes,
+            inline else => |tagged_type| return tagged_type.num_bytes,
         }
     }
 
     pub fn deinit(self: TaggedType) void {
         switch (self) {
             .none => return,
-            else => |tagged_type| return tagged_type.deinit(),
+            inline else => |tagged_type| return tagged_type.deinit(),
         }
     }
     //FIXME: Add in function here to get object size (num_bytes)
 };
-
-pub fn tagged_init(tagged_type: TaggedType, buffer: []u8, allocator: std.mem.Allocator) !void {
-    switch (tagged_type) {
-        .tbranch => |*branch| branch.*.init(buffer, allocator),
-    }
-}
 
 pub const TStreamerInfo = struct {
     header: ClassHeader = undefined,
@@ -432,7 +427,6 @@ pub const TObjArray = struct {
         obj_array.objects = allocator.alloc(TaggedType, obj_array.nobjects) catch |err| {
             std.debug.panic("Cannot make object array {}", .{err});
         };
-        std.debug.print("lb and nobj: {d} {}\n", .{ obj_array.lower_bound, obj_array.nobjects });
         var tag = ObjectTag{};
         for (0..obj_array.nobjects) |idx| {
             tag = ObjectTag.init(cursor, allocator);
@@ -466,7 +460,6 @@ pub const TBasket = struct {
     pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) TBasket {
         _ = allocator;
         var basket = TBasket{};
-        std.debug.print("In TBasket at {}\n", .{cursor.seek});
         basket.nbytes = cursor.get_bytes_as_int(@TypeOf(basket.nbytes));
         basket.key_version = cursor.get_bytes_as_int(@TypeOf(basket.key_version));
         basket.obj_len = cursor.get_bytes_as_int(@TypeOf(basket.obj_len));
@@ -510,7 +503,6 @@ pub const TBranch = struct {
     filename: []u8 = undefined,
 
     num_bytes: u64 = undefined,
-
     pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !TBranch {
         var branch: TBranch = .{};
         const start = cursor.seek;
@@ -537,7 +529,6 @@ pub const TBranch = struct {
         // FIXME: Skipping branch.baskets for now, no root info on how to parse
         // const basket_header = ClassHeader.init(cursor);
         // cursor.seek = cursor.seek - basket_header.num_bytes + 4 + basket_header.byte_counts;
-        std.debug.print("Getting baskets\n", .{});
         branch.baskets = .init(cursor, allocator);
         cursor.seek = cursor.seek + 1; // FIXME: Speedbump?
         branch.basket_bytes = try allocator.alloc(std.meta.Child(@TypeOf(branch.basket_bytes)), branch.max_baskets);
@@ -565,6 +556,73 @@ pub const TBranch = struct {
         cursor.seek += idx;
         branch.num_bytes = cursor.seek - start;
         return branch;
+    }
+
+    // pub fn toArray(self: *TBranch, reader: *std.fs.File.Reader, allocator: std.mem.Allocator, comptime T: type) !types.Array {
+    pub fn toArray(self: *TBranch, reader: *std.fs.File.Reader, allocator: std.mem.Allocator, comptime T: type) ![]T {
+        if (self.leaves.nobjects > 1) std.debug.panic(
+            "Cannot handle branches with more than one leaf, {s} has {d}",
+            .{ self.tname.name, self.leaves.nobjects },
+        );
+
+        // Some basic type checking
+        var bytes_per_elem: u32 = 0;
+        switch (self.leaves.objects[0]) {
+            .tleaf => |leaf| {
+                bytes_per_elem = leaf.len_type;
+            },
+            inline .tleafo, .tleafd, .tleafi, .tleafl => |obj| {
+                const leaf = obj.leaf;
+                bytes_per_elem = leaf.len_type;
+            },
+            else => std.debug.panic("Trying to get array from obj with no leaves.", .{}),
+        }
+        if (bytes_per_elem != @sizeOf(T)) {
+            std.debug.panic(
+                "Cannot cast branch element to a type of wrong size, {d} and {d}",
+                .{ bytes_per_elem, @sizeOf(T) },
+            );
+        }
+        var last_entry: u64 = 0;
+        var total_num_elements: u64 = 0;
+        var entries_in_branch: []u64 = try allocator.alloc(u64, self.basket_seek.len);
+        defer allocator.free(entries_in_branch);
+        for (self.basket_entry[1..], 1..) |entry, idx| {
+            entries_in_branch[idx - 1] = entry - last_entry;
+            total_num_elements += entries_in_branch[idx - 1];
+            last_entry = entry;
+        }
+        const array: types.Array = try .init(T, total_num_elements, allocator);
+        const item_ptr: [*]T = @ptrCast(@alignCast(array.items));
+        var items: []T = item_ptr[0..array.len];
+        const type_info = @typeInfo(T);
+        comptime var bits = 0;
+        comptime switch (type_info) {
+            inline else => |info| bits = info.bits,
+        };
+        var appends: u64 = 0;
+        const bit_type = @Type(.{ .int = .{ .bits = bits, .signedness = .unsigned } });
+        for (self.basket_seek, self.basket_bytes, 0..) |seek, bytes, bi| {
+            if (bytes == 0) {
+                continue;
+            }
+            try reader.seekTo(seek);
+            const data_len: u32 = std.mem.readInt(u32, try reader.interface.peekArray(4), .big);
+            const compressed_data = try reader.interface.readAlloc(allocator, data_len);
+            defer allocator.free(compressed_data);
+            var cursor = Cursor.init(compressed_data);
+            const key: main.Key = try .init(&cursor, undefined, allocator);
+            var data = try allocator.alloc(u8, key.object_len);
+            defer allocator.free(data);
+            data = try util.unzip_and_allocate(compressed_data[(key.key_len + 9)..], data);
+            const entries = entries_in_branch[bi];
+            for (0..(entries)) |idx| {
+                items[appends] = @bitCast(std.mem.readVarInt(bit_type, data[(bytes_per_elem * idx)..(bytes_per_elem * (idx + 1))], .big));
+                appends += 1;
+            }
+        }
+        // return array;
+        return items;
     }
 };
 
@@ -762,11 +820,11 @@ pub const TLeafO = struct {
 };
 
 pub const TTree = struct {
-    header: ClassHeader = undefined,
-    named: TNamed = undefined,
-    att_line: TAttLine = undefined,
-    att_fill: TAttFill = undefined,
-    att_marker: TAttMarker = undefined,
+    header: ClassHeader = .{},
+    named: TNamed = .{},
+    att_line: TAttLine = .{},
+    att_fill: TAttFill = .{},
+    att_marker: TAttMarker = .{},
     entries: u64 = undefined,
     tot_bytes: u64 = undefined,
     zip_bytes: u64 = undefined,
@@ -784,9 +842,10 @@ pub const TTree = struct {
     auto_save: u64 = undefined,
     auto_flush: u64 = undefined,
     estimate: u64 = undefined,
-    branches: TObjArray = undefined,
+    branches: TObjArray = .{},
 
     num_bytes: u64 = undefined,
+    _reader: std.fs.File.Reader = undefined,
     pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !TTree {
         var tree: TTree = .{};
         const start: u64 = cursor.seek;
@@ -818,5 +877,33 @@ pub const TTree = struct {
         tree.branches = .init(cursor, allocator);
         tree.num_bytes = cursor.seek - start;
         return tree;
+    }
+    // pub fn getArray(self: *TTree, name: []const u8, comptime T: type, allocator: std.mem.Allocator) !?types.Array {
+    pub fn getArray(self: *TTree, name: []const u8, comptime T: type, allocator: std.mem.Allocator) !?[]T {
+        // Add null terminator
+        var name_null_term: []u8 = undefined;
+        var len = name.len;
+        if (name[name.len - 1] != 0x00) {
+            len = name.len + 1;
+        }
+        name_null_term = allocator.alloc(u8, len) catch |err| {
+            std.debug.panic("Could not create string: {}", .{err});
+        };
+        defer allocator.free(name_null_term);
+        @memcpy(name_null_term[0..name.len], name);
+        name_null_term[name_null_term.len - 1] = 0x00;
+
+        for (self.branches.objects) |obj| {
+            var branch: TBranch = undefined;
+            switch (obj) {
+                .tbranch => |tbranch| branch = tbranch,
+                // .tbranch_element => |t| branch = t.branch,
+                else => std.debug.panic("Cannot get array from {}, expects a TBranch\n", .{std.meta.activeTag(obj)}),
+            }
+            if (std.mem.eql(u8, name_null_term, branch.tname.name)) {
+                return try branch.toArray(&self._reader, allocator, T);
+            }
+        }
+        return null;
     }
 };

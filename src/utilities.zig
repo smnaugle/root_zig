@@ -44,3 +44,12 @@ pub fn date_time(root_date_time: u32) struct { year: u32, month: u32, day: u32, 
     const second = (root_date_time & 0b00000000000000000000000000111111);
     return .{ .year = year, .month = month, .day = day, .hour = hour, .minute = minute, .second = second };
 }
+
+pub fn unzip_and_allocate(buffer: []u8, out_buffer: []u8) ![]u8 {
+    var reader: std.Io.Reader = .fixed(buffer);
+    var buf: [std.compress.flate.max_window_len]u8 = undefined;
+    var out: std.Io.Writer = .fixed(out_buffer);
+    var zstd_stream = std.compress.flate.Decompress.init(&reader, .zlib, &buf);
+    _ = try zstd_stream.reader.streamRemaining(&out);
+    return out_buffer;
+}
