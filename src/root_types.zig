@@ -571,11 +571,11 @@ pub const TBranch = struct {
             .tleaf => |leaf| {
                 bytes_per_elem = leaf.len_type;
             },
-            inline .tleafo, .tleafd, .tleafi, .tleafl => |obj| {
+            inline .tleaf_element, .tleafo, .tleafd, .tleafi, .tleafl => |obj| {
                 const leaf = obj.leaf;
                 bytes_per_elem = leaf.len_type;
             },
-            else => std.debug.panic("Trying to get array from obj with no leaves.", .{}),
+            else => |obj| std.debug.panic("Cannot parse leaf information for {}", .{obj}),
         }
         if (bytes_per_elem != @sizeOf(T)) {
             std.debug.panic(
@@ -897,7 +897,7 @@ pub const TTree = struct {
             var branch: TBranch = undefined;
             switch (obj) {
                 .tbranch => |tbranch| branch = tbranch,
-                // .tbranch_element => |t| branch = t.branch,
+                .tbranch_element => |t| branch = t.branch,
                 else => std.debug.panic("Cannot get array from {}, expects a TBranch\n", .{std.meta.activeTag(obj)}),
             }
             if (std.mem.eql(u8, name_null_term, branch.tname.name)) {
