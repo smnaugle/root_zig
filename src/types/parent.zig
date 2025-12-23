@@ -1,10 +1,10 @@
 const std = @import("std");
 
-const main = @import("../main.zig");
+const types = @import("types.zig");
 
 pub const Parent = union(enum) {
-    tdirectory_root: *main.TDirectoryRoot,
-    tdirectory: *main.TDirectory,
+    tdirectory_root: *types.TDirectoryRoot,
+    tdirectory: *types.TDirectory,
     none,
 
     pub fn getReader(self: Parent) std.fs.File.Reader {

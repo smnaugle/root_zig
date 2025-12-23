@@ -1,8 +1,32 @@
 const std = @import("std");
 const mem = std.mem;
 
-const types = @import("../root_types.zig");
+const types = @import("types.zig");
 const Cursor = @import("../cursor.zig");
+
+pub const TStreamerInfo = struct {
+    header: types.ClassHeader = undefined,
+    named: types.TNamed = undefined,
+    checksum: u32 = undefined,
+    class_version: u32 = undefined,
+    obj_array: types.TObjArray = undefined,
+
+    num_bytes: u64 = undefined,
+
+    pub fn init(cursor: *Cursor, allocator: std.mem.Allocator) !TStreamerInfo {
+        var streamer: TStreamerInfo = .{};
+        const start = cursor.seek;
+        streamer.header = .init(cursor);
+        streamer.named = try .init(cursor, allocator);
+        streamer.checksum = cursor.get_bytes_as_int(@TypeOf(streamer.checksum));
+        streamer.class_version = cursor.get_bytes_as_int(@TypeOf(streamer.class_version));
+        // NOTE: ROOT docs show that this tag is here, I am not sure how uproot gets around this...
+        _ = types.ObjectTag.init(cursor, allocator);
+        streamer.obj_array = .init(cursor, allocator);
+        streamer.num_bytes = cursor.seek - start;
+        return streamer;
+    }
+};
 
 pub const TStreamerElement = struct {
     // Class tag handled by reader - not currently included in structs
