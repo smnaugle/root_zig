@@ -1,7 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
 
-const types = @import("types.zig");
+const types = @import("../root.zig");
 const Cursor = @import("../cursor.zig");
 
 pub const TStreamerInfo = struct {

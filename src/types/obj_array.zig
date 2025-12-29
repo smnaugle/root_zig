@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const types = @import("types.zig");
+const types = @import("../root.zig");
 const util = @import("../utilities.zig");
 const Cursor = @import("../cursor.zig");
 const constants = @import("../constants.zig").Constants{};

@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const Cursor = @import("../cursor.zig");
-const types = @import("types.zig");
+const types = @import("../root.zig");
 const util = @import("../utilities.zig");
 
 pub const TBasket = struct {

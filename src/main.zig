@@ -1,8 +1,6 @@
 const std = @import("std");
 
-const util = @import("utilities.zig");
-const types = @import("types/types.zig");
-const Cursor = @import("cursor.zig");
+const types = @import("root.zig");
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);

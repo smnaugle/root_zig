@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const types = @import("types.zig");
+const types = @import("../root.zig");
 
 pub const Parent = union(enum) {
     tdirectory_root: *types.TDirectoryRoot,

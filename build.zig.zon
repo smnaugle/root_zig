@@ -1,0 +1,11 @@
+.{
+    .name = .zroot,
+    .version = "0.0.0",
+    .fingerprint = 0x42f02934d38a2bfd,
+    .minimum_zig_version = "0.15.2",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
