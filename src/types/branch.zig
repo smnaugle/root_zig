@@ -149,6 +149,10 @@ pub const TBranch = struct {
         var entries_in_branch: []u64 = try allocator.alloc(u64, self.basket_seek.len);
         defer allocator.free(entries_in_branch);
         for (self.basket_entry[1..], 1..) |entry, idx| {
+            std.debug.print("{d}, {d}\n", .{ entry, last_entry });
+            if (entry == 0) {
+                continue;
+            }
             entries_in_branch[idx - 1] = entry - last_entry;
             total_num_elements += entries_in_branch[idx - 1];
             last_entry = entry;
